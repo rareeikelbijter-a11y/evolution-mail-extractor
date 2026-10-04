@@ -80,3 +80,51 @@ External import regenerates filenames and may normalize line endings/trailing se
 Thunderbird distinguishes raw message storage from `.msf` metadata, so file conversion cannot reproduce all client state: https://source-docs.thunderbird.net/en/latest/backend/folder_storage.html
 
 Evolution folder-name reference: https://gnome.pages.gitlab.gnome.org/evolution-data-server/coverage/index.camel-maildir-store.c.f8f52b2bf0fe7b567e9c11b8c06c1531.html (maildir_full_name_to_dir_name / maildir_dir_name_to_fullname).
+
+
+### Evolution Junk metadata
+
+Use `to-mbox SOURCE NEW_DESTINATION --separate-junk` on an offline recovery copy
+containing `folders.db`. Every message must match its original folder and UID in
+the database, or have UID matches across message tables when its folder name differs.
+A unique UID match is accepted; multiple matches are accepted only when every
+full flag value agrees. All matching table names are recorded for consensus
+matches, without claiming which table is the original folder. Both types are
+counted separately. Conflicting flag values stop conversion; missing records, inconsistent Junk flags, pending journals, and
+conflicting existing Mozilla status headers stop conversion. A failed output
+retains CONVERSION-INCOMPLETE.txt and must not be imported. Retry with a new
+destination after resolving the reported issue.
+
+Junk messages move into ordinary `Junk-Recovery` subfolders retaining their
+original hierarchy. They are not duplicated in the original exported folders.
+This does not configure Thunderbird spam training or its native Junk score.
+The summary counts Junk across all source folders, which may exceed Inbox-only
+counts. Original message bytes and locations are retained in the version 2
+manifest; the original database is stored in `evolution-metadata/folders.db`,
+checksum protected, and restored by `to-maildir`. Old version 1 exports remain
+supported. Use this updated converter for version 2 reverse conversion.
+
+Actual read, replied, and important status comes from the Evolution flag bits,
+not its derived `read` column. Deleted messages are retained visibly rather than
+marked expunged in Thunderbird; their original flags remain in the manifest and
+database. Metadata mode currently does not translate labels, follow-up tags,
+or Thunderbird Junk training. The database is a snapshot of the original copy;
+it is not rebuilt from edits made to the exported mbox files. Reverse conversion
+is intended for an unchanged archive and verifies checksums.
+
+When copying this export into Thunderbird Local Folders, exclude both
+`conversion-manifest.json` and the `evolution-metadata` directory. Keep the
+complete export elsewhere for reverse conversion. Original recovery, export,
+and existing Thunderbird import are never edited by the converter.
+
+
+If a recovery contains message files with no matching database UID, add
+`--allow-missing-metadata` to `--separate-junk`. Those messages remain in their
+original exported folders with filename-derived read/replied/star flags (existing
+Mozilla status headers are retained). Their Junk status is unknown, not assumed
+non-Junk. The summary reports their count; `missing-metadata.json` lists each
+original folder, filename, and UID, and the manifest records the missing match.
+Conflicting database flags still stop conversion. Exclude this JSON report when
+copying the export into Thunderbird; retain it in the complete archival export.
+Reverse conversion preserves these messages byte for byte too, but cannot
+recover classifications missing from the source database.

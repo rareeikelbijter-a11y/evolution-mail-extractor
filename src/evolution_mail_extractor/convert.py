@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import re
 import uuid
+import sqlite3
+from contextlib import ExitStack, closing
 
 MANIFEST = 'conversion-manifest.json'
 
@@ -65,24 +67,74 @@ def mailbox_path(relative, can_escape_dots=False):
     encoded = [storage_component(part) for part in parts]
     return Path(*[part + '.sbd' for part in encoded[:-1]], encoded[-1])
 
-def export(source, destination):
+def evolution_metadata(source):
+    """Read flags from an offline recovery database; never write to it."""
+    database = safe(source, 'folders.db')
+    if not database.is_file():
+        raise ValueError('--separate-junk requires folders.db in the source.')
+    for suffix in ('-wal', '-journal'):
+        sidecar = safe(source, 'folders.db' + suffix)
+        if sidecar.exists() and sidecar.stat().st_size:
+            raise ValueError('Database has a pending journal. Use a recovery copy made after Evolution closes.')
+    raw = database.read_bytes()
+    records = {}
+    with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as connection:
+        if connection.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+            raise ValueError('Evolution database integrity check failed.')
+        tables = connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        for (name,) in tables:
+            quoted = '"' + name.replace('"', '""') + '"'
+            columns = {row[1] for row in connection.execute('PRAGMA table_info(' + quoted + ')')}
+            if not {'uid', 'flags', 'junk', 'deleted'} <= columns:
+                continue
+            rows = {}
+            for uid, flags, junk in connection.execute('SELECT uid, flags, junk FROM ' + quoted):
+                if not isinstance(uid, str) or not isinstance(flags, int):
+                    raise ValueError(f'Invalid database flags in {name!r}.')
+                if bool(flags & 128) != bool(junk):
+                    raise ValueError(f'Inconsistent Junk flags in {name!r}, UID {uid!r}.')
+                rows[uid] = flags
+            records[name] = rows
+    if database.read_bytes() != raw:
+        raise ValueError('Database changed during reading. Close Evolution and retry with a new destination.')
+    return records, raw
+
+def export(source, destination, separate_junk=False, allow_missing_metadata=False):
     folders = []
     dot_marker = safe(source, '..maildir++')
     can_escape_dots = dot_marker.is_file()
+    records, database_raw = evolution_metadata(source) if separate_junk else ({}, None)
     occupied = set()
-    count = 0
-    for base, dirs, files in walk(source):
-        if not {'cur', 'new', 'tmp'} <= set(dirs):
-            continue
-        relative = base.relative_to(source).as_posix()
-        target_rel = mailbox_path(relative, can_escape_dots).as_posix()
-        if target_rel in occupied:
-            raise ValueError(f'Folder mapping collision: {relative}')
-        occupied.add(target_rel)
-        target = safe(destination, target_rel)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        messages = []
-        with target.open('xb') as output:
+    count = junk_count = junk_read = relocated_count = 0
+    consensus_count = 0
+    missing_metadata = []
+    uid_index = {}
+    for table, rows in records.items():
+        for uid, flags in rows.items():
+            uid_index.setdefault(uid, []).append((table, flags))
+    with ExitStack() as stack:
+        streams = {}
+        def stream_for(relative):
+            if relative not in streams:
+                target = safe(destination, relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open('xb'):
+                    pass
+                streams[relative] = target
+            return streams[relative]
+        for base, dirs, files in walk(source):
+            if not {'cur', 'new', 'tmp'} <= set(dirs):
+                continue
+            relative = base.relative_to(source).as_posix()
+            target_rel = mailbox_path(relative, can_escape_dots).as_posix()
+            if separate_junk and Path(target_rel).parts[0] in ('Junk-Recovery', 'Junk-Recovery.sbd'):
+                raise ValueError('Source folder conflicts with reserved Junk-Recovery name.')
+            if target_rel in occupied:
+                raise ValueError(f'Folder mapping collision: {relative}')
+            occupied.add(target_rel)
+            stream_for(target_rel)
+            database_folder = '/'.join(folder_parts(relative, can_escape_dots))
+            messages = []
             for state in ('cur', 'new'):
                 for path in sorted((base / state).iterdir()):
                     if path.is_symlink() or not path.is_file():
@@ -90,29 +142,87 @@ def export(source, destination):
                     raw = path.read_bytes()
                     flags = path.name.split(':2,', 1)[1] if ':2,' in path.name else ''
                     status = (1 if 'S' in flags else 0) | (2 if 'R' in flags else 0) | (4 if 'F' in flags else 0)
-                    # Existing Mozilla headers are left untouched, avoiding duplicate headers.
-                    prefix = b'' if re.search(br'(?im)^X-Mozilla-Status:', raw.split(b'\n\n', 1)[0]) else f'X-Mozilla-Status: {status:04x}\n'.encode()
+                    message_mbox = target_rel
+                    metadata = {}
+                    if separate_junk:
+                        uid = path.name.split(':2,', 1)[0]
+                        db_flags = records.get(database_folder, {}).get(uid)
+                        matched_folder = database_folder
+                        if db_flags is None:
+                            matches = uid_index.get(uid, [])
+                            if not matches and allow_missing_metadata:
+                                missing_metadata.append({'folder': relative, 'file': f'{state}/{path.name}', 'uid': uid})
+                                metadata['database_match'] = 'missing'
+                                matched_folder = None
+                            elif not matches or len({flags for _, flags in matches}) != 1:
+                                reason = 'Conflicting database flags' if matches else 'No database flags'
+                                raise ValueError(f'{reason} for folder {database_folder!r}, UID {uid!r}; stopped to avoid misclassification.')
+                            else:
+                                matched_folder, db_flags = matches[0]
+                                if len(matches) > 1:
+                                    metadata['evolution_database_folders'] = [name for name, _ in matches]
+                                    metadata['database_match'] = 'identical-flags-consensus'
+                                    matched_folder = None
+                                    consensus_count += 1
+                                else:
+                                    relocated_count += 1
+                        if matched_folder is not None:
+                            metadata['evolution_database_folder'] = matched_folder
+                        if db_flags is not None:
+                            status = (1 if db_flags & 16 else 0) | (2 if db_flags & 1 else 0) | (4 if db_flags & 8 else 0)
+                            metadata['evolution_flags'] = db_flags
+                            if db_flags & 128:
+                                message_mbox = 'Junk-Recovery.sbd/' + target_rel
+                                junk_count += 1
+                                junk_read += bool(db_flags & 16)
+                    header = re.split(br'\r?\n\r?\n', raw, maxsplit=1)[0]
+                    existing = re.search(br'(?im)^X-Mozilla-Status:[ \t]*([0-9a-f]+)', header)
+                    if separate_junk and 'evolution_flags' in metadata and re.search(br'(?im)^X-Mozilla-Status:', header):
+                        if existing is None or int(existing[1], 16) != status:
+                            raise ValueError(f'Existing Mozilla status conflicts with database: {path}')
+                    prefix = b'' if re.search(br'(?im)^X-Mozilla-Status:', header) else f'X-Mozilla-Status: {status:04x}\n'.encode()
                     encoded = re.sub(br'(?m)^(>*From )', br'>\1', raw)
-                    output.write(b'From MAILER-DAEMON Thu Jan  1 00:00:00 1970\n')
-                    offset = output.tell()
-                    output.write(prefix + encoded)
-                    output.write(b'\n\n')
-                    messages.append({'file': f'{state}/{path.name}', 'offset': offset,
-                                     'length': len(prefix + encoded), 'prefix': len(prefix),
-                                     'sha256': digest(raw)})
+                    output_path = stream_for(message_mbox)
+                    with output_path.open('ab') as output:
+                        output.write(b'From MAILER-DAEMON Thu Jan  1 00:00:00 1970\n')
+                        offset = output.tell()
+                        output.write(prefix + encoded)
+                        output.write(b'\n\n')
+                    entry = {'file': f'{state}/{path.name}', 'offset': offset,
+                             'length': len(prefix + encoded), 'prefix': len(prefix),
+                             'sha256': digest(raw), **metadata}
+                    if message_mbox != target_rel:
+                        entry['mbox'] = message_mbox
+                    messages.append(entry)
                     count += 1
-        folders.append({'source': relative, 'mbox': target_rel, 'messages': messages})
-    # Thunderbird needs an mbox alongside every .sbd parent directory.
-    for folder in folders:
-        parent = (destination / folder['mbox']).parent
+            folders.append({'source': relative, 'mbox': target_rel, 'messages': messages})
+    for relative in streams:
+        parent = (destination / relative).parent
         while parent != destination:
             parent.with_name(parent.name[:-4]).touch(exist_ok=True)
             parent = parent.parent
     if not folders:
         raise ValueError('No complete Maildir folders found.')
-    (destination / MANIFEST).write_text(json.dumps({'format': 'evolution-mail-extractor-v1', 'folder_mapping': 'evolution-hierarchy-v2',
+    manifest = {'format': 'evolution-mail-extractor-v2' if separate_junk else 'evolution-mail-extractor-v1',
+        'folder_mapping': 'evolution-hierarchy-v2',
         'dot_escape_marker_hex': dot_marker.read_bytes().hex() if can_escape_dots else None,
-        'folders': folders}, indent=2))
+        'folders': folders}
+    if separate_junk:
+        (destination / 'evolution-metadata').mkdir()
+        (destination / 'evolution-metadata/folders.db').write_bytes(database_raw)
+        manifest['database'] = {'file': 'evolution-metadata/folders.db', 'sha256': digest(database_raw)}
+        manifest['database_uid_fallback_matches'] = relocated_count
+        manifest['database_consensus_matches'] = consensus_count
+        manifest['missing_metadata'] = missing_metadata
+        if missing_metadata:
+            (destination / 'missing-metadata.json').write_text(json.dumps(missing_metadata, indent=2))
+        manifest['junk_summary'] = {'messages': junk_count, 'read': junk_read, 'unread': junk_count - junk_read}
+        print(f'Junk separated: {junk_count:,}; read: {junk_read:,}; unread: {junk_count - junk_read:,}')
+        print(f'Database records matched by unique UID in a different folder: {relocated_count:,}')
+        print(f'Database records matched by identical flags across multiple tables: {consensus_count:,}')
+        print(f'Messages with unknown Junk status (kept in original folders): {len(missing_metadata):,}')
+        print('Junk-Recovery is an ordinary folder, not Thunderbird spam training.')
+    (destination / MANIFEST).write_text(json.dumps(manifest, indent=2))
     return len(folders), count
 
 def maildir(root):
@@ -121,15 +231,20 @@ def maildir(root):
 
 def restore_manifest(source, destination):
     manifest = json.loads(safe(source, MANIFEST).read_text())
-    if manifest.get('format') != 'evolution-mail-extractor-v1':
+    if manifest.get('format') not in ('evolution-mail-extractor-v1', 'evolution-mail-extractor-v2'):
         raise ValueError('Unsupported conversion manifest.')
     count = 0
     used = set()
     for folder in manifest['folders']:
         root = destination if folder['source'] == '.' else safe(destination, folder['source'])
         maildir(root)
-        with safe(source, folder['mbox']).open('rb') as stream:
+        with ExitStack() as stack:
+            streams = {}
             for message in folder['messages']:
+                box_name = message.get('mbox', folder['mbox']) if manifest['format'] == 'evolution-mail-extractor-v2' else folder['mbox']
+                if box_name not in streams:
+                    streams[box_name] = stack.enter_context(safe(source, box_name).open('rb'))
+                stream = streams[box_name]
                 target = safe(root, message['file'])
                 if target.parent not in (root / 'cur', root / 'new'):
                     raise ValueError('Invalid message location in manifest.')
@@ -155,6 +270,12 @@ def restore_manifest(source, destination):
     if marker_hex is not None:
         with (destination / '..maildir++').open('xb') as output:
             output.write(bytes.fromhex(marker_hex))
+    if 'database' in manifest:
+        data = safe(source, manifest['database']['file']).read_bytes()
+        if digest(data) != manifest['database']['sha256']:
+            raise ValueError('Database checksum mismatch.')
+        with (destination / 'folders.db').open('xb') as output:
+            output.write(data)
     return len(used), count
 
 def import_external(source, destination, dialect):
@@ -209,7 +330,9 @@ def import_external(source, destination, dialect):
         raise ValueError('No mbox files found.')
     return len(boxes), count
 
-def convert(source, destination, direction, dialect=None):
+def convert(source, destination, direction, dialect=None, separate_junk=False, allow_missing_metadata=False):
+    if allow_missing_metadata and not separate_junk:
+        raise ValueError('--allow-missing-metadata requires --separate-junk.')
     source = source.expanduser()
     destination = destination.expanduser()
     if source.is_symlink() or not source.exists():
@@ -228,7 +351,7 @@ def convert(source, destination, direction, dialect=None):
     marker = destination / 'CONVERSION-INCOMPLETE.txt'
     marker.write_text('Conversion did not finish. Do not import this directory. Use a new destination when retrying.\n')
     if direction == 'to-mbox':
-        result = export(source, destination)
+        result = export(source, destination, separate_junk, allow_missing_metadata)
     elif source.is_dir() and (source / MANIFEST).exists():
         result = restore_manifest(source, destination)
     else:
