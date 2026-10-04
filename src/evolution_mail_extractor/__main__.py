@@ -1,71 +1,31 @@
-"""Read-only inventory of a recovered Evolution Maildir archive."""
-
+"""Inventory and offline Maildir/mbox conversion."""
 import argparse
-import os
 from pathlib import Path
-
+import sys
+from . import inventory
+from .convert import convert
 
 def main():
+    # Retain the original single-source inventory command.
+    if len(sys.argv) > 1 and sys.argv[1] not in ('to-mbox', 'to-maildir', '-h', '--help'):
+        return inventory.main()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", type=Path, help="Recovery copy to scan")
+    sub = parser.add_subparsers(dest='command', required=True)
+    for name in ('to-mbox', 'to-maildir'):
+        command = sub.add_parser(name)
+        command.add_argument('source', type=Path)
+        command.add_argument('destination', type=Path, help='New directory; must not already exist')
+        if name == 'to-maildir':
+            command.add_argument('--mbox-dialect', choices=('mboxrd', 'mboxo'), help='Required for external mbox archives')
     args = parser.parse_args()
-    source = args.source.expanduser()
+    try:
+        folders, messages = convert(args.source, args.destination, args.command, getattr(args, 'mbox_dialect', None))
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(f'Conversion failed: {error}', file=sys.stderr)
+        return 1
+    print(f'Conversion completed: {folders:,} folders; {messages:,} messages')
+    print(f'Destination: {args.destination.expanduser()}')
+    return 0
 
-    if source.is_symlink() or not source.is_dir():
-        parser.error("Source must be an existing directory, not a symlink.")
-
-    folders = 0
-    candidates = 0
-    total_bytes = 0
-    skipped_links = 0
-    errors = []
-
-    def record_error(error):
-        errors.append(str(error))
-
-    for root, dirs, files in os.walk(
-        source, followlinks=False, onerror=record_error
-    ):
-        root = Path(root)
-
-        for name in dirs[:]:
-            if (root / name).is_symlink():
-                dirs.remove(name)
-                skipped_links += 1
-
-        if {"cur", "new", "tmp"}.issubset(dirs):
-            folders += 1
-
-        if root.name not in {"cur", "new"}:
-            continue
-
-        # Only count files belonging to a complete Maildir structure.
-        siblings = [root.parent / name for name in ("cur", "new", "tmp")]
-        if not all(p.is_dir() and not p.is_symlink() for p in siblings):
-            continue
-
-        for name in files:
-            path = root / name
-            try:
-                if path.is_symlink():
-                    skipped_links += 1
-                elif path.is_file():
-                    total_bytes += path.stat().st_size
-                    candidates += 1
-            except OSError as error:
-                record_error(error)
-
-    print(f"Source: {source}")
-    print(f"Maildir folders: {folders:,}")
-    print(f"Candidate message files: {candidates:,}")
-    print(f"Candidate file size: {total_bytes / (1024 ** 2):,.1f} MiB")
-    print(f"Skipped symbolic links: {skipped_links:,}")
-    print(f"Errors: {len(errors):,}")
-    for error in errors[:10]:
-        print(f"  {error}")
-
-    return 1 if errors else 0
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main())
