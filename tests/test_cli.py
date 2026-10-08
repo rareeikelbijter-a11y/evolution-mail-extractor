@@ -24,6 +24,10 @@ class CliTests(unittest.TestCase):
             result = self.run_cli('to-maildir', base / 'mbox', base / 'restored')
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual((base / 'restored/new/a').read_bytes(), (source / 'new/a').read_bytes())
+            result = self.run_cli('prepare-evolution', base / 'mbox', base / 'prepared')
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('Junk-aware v2', result.stderr)
+            self.assertFalse((base / 'prepared').exists())
 
     def test_external_requires_dialect(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -38,6 +42,7 @@ class CliTests(unittest.TestCase):
         result = self.run_cli('--help')
         self.assertEqual(result.returncode, 0)
         self.assertIn('to-mbox', result.stdout)
+        self.assertIn('prepare-evolution', result.stdout)
 
 if __name__ == '__main__':
     unittest.main()

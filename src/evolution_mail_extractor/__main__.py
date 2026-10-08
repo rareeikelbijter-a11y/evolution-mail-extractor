@@ -8,11 +8,11 @@ from .convert import convert
 
 def main():
     # Retain the original single-source inventory command.
-    if len(sys.argv) > 1 and sys.argv[1] not in ('to-mbox', 'to-maildir', '-h', '--help'):
+    if len(sys.argv) > 1 and sys.argv[1] not in ('to-mbox', 'to-maildir', 'prepare-evolution', '-h', '--help'):
         return inventory.main()
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('to-mbox', 'to-maildir'):
+    for name in ('to-mbox', 'to-maildir', 'prepare-evolution'):
         command = sub.add_parser(name)
         command.add_argument('source', type=Path)
         command.add_argument('destination', type=Path, help='New directory; must not already exist')
@@ -23,8 +23,12 @@ def main():
             command.add_argument('--mbox-dialect', choices=('mboxrd', 'mboxo'), help='Required for external mbox archives')
     args = parser.parse_args()
     try:
+        if args.command == 'prepare-evolution':
+            from .evolution import prepare_evolution
+            prepare_evolution(args.source, args.destination)
+            return 0
         folders, messages = convert(args.source, args.destination, args.command, getattr(args, 'mbox_dialect', None), getattr(args, 'separate_junk', False), getattr(args, 'allow_missing_metadata', False))
-    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, sqlite3.Error) as error:
         print(f'Conversion failed: {error}', file=sys.stderr)
         return 1
     print(f'Conversion completed: {folders:,} folders; {messages:,} messages')

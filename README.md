@@ -1,6 +1,6 @@
 # Evolution mail extractor — corrected folder mapping
 
-Python 3.10+; standard library only. Designed for offline recovery copies on Linux.
+Python 3.10+. Inventory and offline conversions use only the standard library; native Evolution preparation optionally uses system PyGObject/Camel bindings. Designed for offline recovery copies on Linux.
 
 ## Check the installation
 
@@ -73,8 +73,8 @@ External import regenerates filenames and may normalize line endings/trailing se
 - This is a converter for recovered files, not a live-profile migration utility.
 - No account settings, passwords, contacts, filters, tags, spam scores, or client indexes are migrated.
 - Generated mbox files add Mozilla read/replied/starred status headers when no existing `X-Mozilla-Status` is present. Existing Mozilla headers are retained and may take precedence over Maildir flags. Other Maildir flags survive an archival round trip through the manifest but are not mapped to Thunderbird UI state.
-- Generic Maildir output still requires an Evolution import workflow. It must not be copied into a running Evolution profile.
-- The user verified ordinary-folder import and attachments in Thunderbird. The corrected Sent/Inbox hierarchy and special-character storage names still need an application-level test. Evolution application import has not yet been verified. Test a small sample in separate application profiles before importing the full archive.
+- Generic archival Maildir output is distinct from native Evolution preparation. Use `prepare-evolution` below to rebuild summaries and restore the supported flags before a manual installation into a closed profile.
+- The user verified the corrected Thunderbird hierarchy and the standalone Camel restore with Evolution 3.56.2: 55,567 unchanged messages across 2,311 source folders, 55,547 known flag records and 5,641 Junk messages. The integrated command follows that tested process; validate its output in a separate directory before installation on another machine/version.
 - Resource use is approximately one message in memory, plus the manifest metadata. No GUI or third-party dependencies.
 
 Thunderbird distinguishes raw message storage from `.msf` metadata, so file conversion cannot reproduce all client state: https://source-docs.thunderbird.net/en/latest/backend/folder_storage.html
@@ -128,3 +128,47 @@ Conflicting database flags still stop conversion. Exclude this JSON report when
 copying the export into Thunderbird; retain it in the complete archival export.
 Reverse conversion preserves these messages byte for byte too, but cannot
 recover classifications missing from the source database.
+
+
+## Prepare a native Evolution restore
+
+Run with **system Python**, which can see installed PyGObject and Camel 1.2
+introspection bindings. Existing inventory/conversion commands still work in
+`.venv`. On Theo's Ubuntu installation the required Camel package is
+`gir1.2-camel-1.2`, already installed. Other distributions package these bindings
+differently; KDE is not required.
+
+```bash
+PYTHONPATH=src python3 -m evolution_mail_extractor prepare-evolution \
+  "$HOME/Evolution-Mbox-Export-With-Junk-4" "$HOME/Evolution-Prepared-Integrated"
+```
+
+The source must be an unchanged v2 export made with `--separate-junk`, containing
+its original database and Evolution `..maildir++` marker. The destination must
+be new, outside the live Evolution mail directory, and separate from the source.
+No hardcoded user, UID, or message count is used. The command restores archived
+bytes into `DESTINATION/mail/local`, adds missing standard folder structures,
+lets Camel update summaries, and applies known read/replied/starred/Junk flags
+through Camel. Each nonempty folder must expose exactly the archived UID set.
+Saved SQLite flag records and every message checksum are checked afterward.
+Folder-name aliases, unsupported native names and mismatches stop preparation.
+The command does not automatically install a profile or transfer account settings.
+
+Successful output contains `PREPARATION-VERIFIED.json`, the prepared `mail/local`
+tree, and helper cache/certificate directories. Move only `mail/local` if manually
+installing after review, with Evolution closed and the previous local tree saved.
+Failure retains `PREPARATION-INCOMPLETE.txt`; never install failed output. Retry
+with a new destination. Keep the original archive for exact archival restoration:
+native preparation updates summaries and may rename message flag suffixes.
+
+Messages with missing metadata remain accessible, without guessed Junk status;
+Camel's rebuilt state is not a recovery of their unknown original flags. Deleted
+flags are not applied, so recovered mail stays visible. Labels, follow-up tags,
+forwarded flags and spam training are not translated. Empty standard folders may
+be added. Native search-index warnings can occur; the final verification result
+is required before installation.
+
+Automated preparation tests use a fake Camel provider to exercise verification
+failures and output handling. They do not replace a native application test.
+The integrated CLI needs a sample run with the installed Camel version before
+considering that release validated on the target machine.
