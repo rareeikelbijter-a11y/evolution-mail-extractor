@@ -1,6 +1,22 @@
-# Evolution mail extractor — corrected folder mapping
+# Evolution mail extractor
 
 Python 3.10+. Inventory and offline conversions use only the standard library; native Evolution preparation optionally uses system PyGObject/Camel bindings. Designed for offline recovery copies on Linux.
+
+## Set up
+
+Extract or clone the project, then open a terminal in its directory:
+
+```bash
+python3 -m venv .venv
+```
+
+There are no pip dependencies for inventory or offline conversion. On Ubuntu,
+if creating the environment reports that venv is unavailable, install
+`python3-venv` through your package manager and retry.
+
+Work only from recovery copies made with the mail client closed. Keep a separate
+verified backup. Conversion destinations must be new directories; failed output
+must not be imported. Archive exports must remain unchanged for exact restoration.
 
 ## Check the installation
 
@@ -32,7 +48,7 @@ Evolution names are interpreted using its local Maildir rules:
 | --- | --- |
 | Archive root (`cur`, `new`, `tmp`) | Inbox |
 | `.Sent` | Sent |
-| `.Sent.38ANew.Council` | Sent → 38ANew → Council |
+| `.Sent.Household.Council` | Sent → Household → Council |
 | `.Humans` | Humans |
 | `..Personal.Shopping` | Inbox → Personal → Shopping |
 
@@ -66,7 +82,7 @@ PYTHONPATH=src .venv/bin/python -m evolution_mail_extractor to-maildir \
 
 Only choose `mboxrd` when the source's escaping convention is known. `mboxo` is also accepted; it has inherently ambiguous quoting of literal `>From ` lines. `mboxcl` and `mboxcl2` are unsupported. Automatic format detection is deliberately omitted because guessing can alter message bodies.
 
-External import regenerates filenames and may normalize line endings/trailing separators through Python's mbox reader. It is **not byte-exact**. Mozilla read/replied/starred flags and conventional `Status: R` read flags are mapped. All external records, including records marked deleted, are recovered. External mbox folder names are encoded using Evolution’s `_2E` (dot) and `_5F` (underscore) rules, with a `..maildir++` marker. Inbox is mapped to the Maildir root; other folders use a single leading dot. Re-export retains that hierarchy. Ordinary subdirectories are ignored; only `.sbd` hierarchies are scanned. `.msf`, `.json`, `msgFilterRules.dat` and `popstate.dat` are skipped.
+External import regenerates filenames and may normalize line endings/trailing separators through Python's mbox reader. It is **not byte-exact**. Mozilla read/replied/starred flags and conventional `Status: R` read flags are mapped. All external records, including records marked deleted, are recovered. External mbox folder names are encoded using Evolution’s `_2E` (dot) and `_5F` (underscore) rules, with a `..maildir++` marker. Inbox is mapped to the Maildir root; other folders use a single leading dot. Re-export retains that hierarchy. Folder mapping collisions stop the import instead of merging folders. Ordinary subdirectories are ignored; only `.sbd` hierarchies are scanned. `.msf`, `.json`, `msgFilterRules.dat` and `popstate.dat` are skipped.
 
 ## Scope and remaining integration work
 
@@ -75,7 +91,7 @@ External import regenerates filenames and may normalize line endings/trailing se
 - Generated mbox files add Mozilla read/replied/starred status headers when no existing `X-Mozilla-Status` is present. Existing Mozilla headers are retained and may take precedence over Maildir flags. Other Maildir flags survive an archival round trip through the manifest but are not mapped to Thunderbird UI state.
 - Generic archival Maildir output is distinct from native Evolution preparation. Use `prepare-evolution` below to rebuild summaries and restore the supported flags before a manual installation into a closed profile.
 - The user verified the corrected Thunderbird hierarchy and the standalone Camel restore with Evolution 3.56.2: 55,567 unchanged messages across 2,311 source folders, 55,547 known flag records and 5,641 Junk messages. The integrated command follows that tested process; validate its output in a separate directory before installation on another machine/version.
-- Resource use is approximately one message in memory, plus the manifest metadata. No GUI or third-party dependencies.
+- Resource use includes one message at a time, manifest metadata and, in Junk-aware mode, the database snapshot and UID index. External mbox import also builds a mailbox index. There is no GUI; offline conversion uses only the standard library.
 
 Thunderbird distinguishes raw message storage from `.msf` metadata, so file conversion cannot reproduce all client state: https://source-docs.thunderbird.net/en/latest/backend/folder_storage.html
 
@@ -134,13 +150,13 @@ recover classifications missing from the source database.
 
 Run with **system Python**, which can see installed PyGObject and Camel 1.2
 introspection bindings. Existing inventory/conversion commands still work in
-`.venv`. On Theo's Ubuntu installation the required Camel package is
-`gir1.2-camel-1.2`, already installed. Other distributions package these bindings
+`.venv`. On the tested Ubuntu installation the required Camel package is
+`gir1.2-camel-1.2`, alongside PyGObject (`python3-gi`). Other distributions package these bindings
 differently; KDE is not required.
 
 ```bash
 PYTHONPATH=src python3 -m evolution_mail_extractor prepare-evolution \
-  "$HOME/Evolution-Mbox-Export-With-Junk-4" "$HOME/Evolution-Prepared-Integrated"
+  "$HOME/Evolution-Mbox-Export-With-Junk" "$HOME/Evolution-Prepared"
 ```
 
 The source must be an unchanged v2 export made with `--separate-junk`, containing
@@ -172,3 +188,12 @@ Automated preparation tests use a fake Camel provider to exercise verification
 failures and output handling. They do not replace a native application test.
 The integrated CLI needs a sample run with the installed Camel version before
 considering that release validated on the target machine.
+
+## Release status and licence
+
+Initial recovery utility: offline conversion has automated coverage and a reported
+full-archive round trip. Native Evolution preparation is experimental until the
+integrated command is tested with the target Camel version. This repository does
+not include recovered emails, databases or conversion exports.
+
+MIT licence; see [LICENSE](LICENSE).

@@ -294,6 +294,7 @@ def import_external(source, destination, dialect):
                     continue
                 boxes.append((base / name, [p[:-4] for p in rel.parts[:-1]] + [name]))
     count = 0
+    occupied = set()
     (destination / '..maildir++').write_text('maildir++ 1\n')
     for path, parts in boxes:
         # Encode Evolution's literal dots and underscores; keep Inbox special.
@@ -303,6 +304,9 @@ def import_external(source, destination, dialect):
         else:
             name = '.' + '.'.join(encoded_parts)
         root = destination if name == '.' else safe(destination, name)
+        if root in occupied:
+            raise ValueError(f'External folder mapping collision: {path}')
+        occupied.add(root)
         maildir(root)
         box = mailbox.mbox(str(path), create=False)
         try:

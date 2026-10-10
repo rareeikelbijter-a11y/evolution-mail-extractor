@@ -1,4 +1,4 @@
-"""Regression coverage for the folder display failure found on Theo's laptop."""
+"""Regression coverage for the folder display failure found during native client testing."""
 import json
 import mailbox
 from pathlib import Path
@@ -69,6 +69,21 @@ class FolderMappingTests(unittest.TestCase):
                 maildir(source / name)
             with self.assertRaisesRegex(ValueError, 'collision'):
                 convert(source, base / 'export', 'to-mbox')
+
+    def test_external_inbox_alias_collision_stops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = base / 'source'
+            source.mkdir()
+            raw = b'From sender Thu Jan  1 00:00:00 1970\nSubject: test\n\nbody\n\n'
+            for name in ('Inbox', 'inbox'):
+                (source / name).write_bytes(raw)
+            destination = base / 'maildir'
+            with self.assertRaisesRegex(ValueError, 'collision'):
+                convert(source, destination, 'to-maildir', 'mboxrd')
+            self.assertTrue((destination / 'CONVERSION-INCOMPLETE.txt').exists())
+            for name in ('Inbox', 'inbox'):
+                self.assertEqual((source / name).read_bytes(), raw)
 
     def test_legacy_export_still_restores(self):
         with tempfile.TemporaryDirectory() as tmp:
